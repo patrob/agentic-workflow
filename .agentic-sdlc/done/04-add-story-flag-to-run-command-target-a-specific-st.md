@@ -5,7 +5,7 @@ title: >-
   optionally with --step to run a specific phase (refine, research, plan,
   implement, review)
 priority: 1
-status: in-progress
+status: done
 type: feature
 created: '2026-01-09'
 labels:
@@ -13,7 +13,7 @@ labels:
 research_complete: true
 plan_complete: true
 implementation_complete: true
-reviews_complete: false
+reviews_complete: true
 updated: '2026-01-09'
 ---
 # Add --story flag to run command: target a specific story by ID or slug, optionally with --step to run a specific phase

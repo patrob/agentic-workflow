@@ -4,15 +4,15 @@ title: >-
   Fix workflow priority order: in-progress items first (finish WIP), then ready
   items, then backlog refinement. Current logic is backwards.
 priority: 6
-status: ready
+status: done
 type: feature
 created: '2026-01-09'
 labels:
   - s
-research_complete: false
-plan_complete: false
-implementation_complete: false
-reviews_complete: false
+research_complete: true
+plan_complete: true
+implementation_complete: true
+reviews_complete: true
 updated: '2026-01-09'
 ---
 # Fix workflow priority order: in-progress items first (finish WIP), then ready items, then backlog refinement
