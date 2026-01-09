@@ -41,6 +41,8 @@ export interface WorkflowExecutionState {
     options: {
       auto?: boolean;
       dryRun?: boolean;
+      story?: string; // Target story ID/slug for full SDLC mode
+      fullSDLC?: boolean; // Flag indicating full SDLC workflow mode
     };
     storyContentHash?: string;
   };

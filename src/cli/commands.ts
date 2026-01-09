@@ -1,9 +1,10 @@
 import chalk from 'chalk';
 import ora from 'ora';
+import fs from 'fs';
 import { getSdlcRoot, loadConfig, initConfig } from '../core/config.js';
 import { initializeKanban, kanbanExists, assessState, getBoardStats, findStoryBySlug, findStoryById } from '../core/kanban.js';
 import { createStory, parseStory } from '../core/story.js';
-import { Story, Action, KanbanFolder, WorkflowExecutionState, CompletedActionRecord } from '../types/index.js';
+import { Story, Action, ActionType, KanbanFolder, WorkflowExecutionState, CompletedActionRecord } from '../types/index.js';
 import { getThemedChalk } from '../core/theme.js';
 import {
   saveWorkflowState,
@@ -135,6 +136,78 @@ export async function add(title: string): Promise<void> {
 }
 
 /**
+ * Validates flag combinations for --auto --story --step conflicts
+ * @throws Error if conflicting flags are detected
+ */
+function validateAutoStoryOptions(options: { auto?: boolean; story?: string; step?: string }): void {
+  if (options.auto && options.story && options.step) {
+    throw new Error(
+      'Cannot combine --auto --story with --step flag.\n' +
+      'Use either:\n' +
+      '  - agentic-sdlc run --auto --story <id> (full SDLC)\n' +
+      '  - agentic-sdlc run --story <id> --step <phase> (single phase)'
+    );
+  }
+}
+
+/**
+ * Determines if a specific phase should be executed based on story state
+ * @param story The story to check
+ * @param phase The phase to evaluate
+ * @returns true if the phase should be executed, false if it should be skipped
+ */
+function shouldExecutePhase(story: Story, phase: ActionType): boolean {
+  switch (phase) {
+    case 'refine':
+      // Execute refine if story is in backlog
+      return story.frontmatter.status === 'backlog';
+    case 'research':
+      return !story.frontmatter.research_complete;
+    case 'plan':
+      return !story.frontmatter.plan_complete;
+    case 'implement':
+      return !story.frontmatter.implementation_complete;
+    case 'review':
+      return !story.frontmatter.reviews_complete;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Generates the complete SDLC action sequence for a story
+ * @param story The target story
+ * @param c Themed chalk instance for logging (optional)
+ * @returns Array of actions to execute in sequence
+ */
+function generateFullSDLCActions(story: Story, c?: any): Action[] {
+  const allPhases: ActionType[] = ['refine', 'research', 'plan', 'implement', 'review'];
+  const actions: Action[] = [];
+  const skippedPhases: string[] = [];
+
+  for (const phase of allPhases) {
+    if (shouldExecutePhase(story, phase)) {
+      actions.push({
+        type: phase,
+        storyId: story.frontmatter.id,
+        storyPath: story.path,
+        reason: `Full SDLC: ${phase} phase`,
+        priority: 0,
+      });
+    } else {
+      skippedPhases.push(phase);
+    }
+  }
+
+  // Log skipped phases if chalk is provided
+  if (c && skippedPhases.length > 0) {
+    console.log(c.dim(`  Skipping completed phases: ${skippedPhases.join(', ')}`));
+  }
+
+  return actions;
+}
+
+/**
  * Run the workflow (process one action or all)
  */
 export async function run(options: { auto?: boolean; dryRun?: boolean; continue?: boolean; story?: string; step?: string }): Promise<void> {
@@ -160,6 +233,17 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
     return;
   }
 
+  // Validate flag combinations
+  try {
+    validateAutoStoryOptions(options);
+  } catch (error) {
+    console.log(c.error(`Error: ${error instanceof Error ? error.message : String(error)}`));
+    return;
+  }
+
+  // Detect full SDLC mode: --auto combined with --story
+  let isFullSDLC = !!(options.auto && options.story && !options.continue);
+
   // Handle --continue flag
   let workflowId: string;
   let completedActions: CompletedActionRecord[] = [];
@@ -179,12 +263,26 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
     completedActions = existingState.completedActions;
     storyContentHash = existingState.context.storyContentHash;
 
+    // Restore full SDLC mode from checkpoint if it was set
+    if (existingState.context.options.fullSDLC) {
+      isFullSDLC = true;
+      // Also restore the story option for proper filtering
+      if (existingState.context.options.story) {
+        options.story = existingState.context.options.story;
+        options.auto = true; // Ensure auto mode is set for continuation
+      }
+    }
+
     // Display resume information
     console.log();
     console.log(c.info('⟳ Resuming workflow from checkpoint'));
     console.log(c.dim(`  Workflow ID: ${workflowId}`));
     console.log(c.dim(`  Checkpoint: ${new Date(existingState.timestamp).toLocaleString()}`));
     console.log(c.dim(`  Completed actions: ${completedActions.length}`));
+
+    if (isFullSDLC) {
+      console.log(c.dim(`  Mode: Full SDLC (story: ${options.story})`));
+    }
 
     // Warn if story content changed
     if (storyContentHash && completedActions.length > 0) {
@@ -243,17 +341,41 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
       return;
     }
 
-    // Filter actions to only include those for the target story
-    const originalCount = assessment.recommendedActions.length;
-    assessment.recommendedActions = assessment.recommendedActions.filter(
-      action => action.storyPath === targetStory!.path
-    );
+    // Full SDLC mode: Generate complete phase sequence for the story
+    if (isFullSDLC) {
+      console.log();
+      console.log(c.bold(`🚀 Starting full SDLC for story: ${targetStory.frontmatter.title}`));
+      console.log(c.dim(`  ID: ${targetStory.frontmatter.id}`));
+      console.log(c.dim(`  Status: ${targetStory.frontmatter.status}`));
 
-    console.log(c.info(`Targeting story: ${targetStory.frontmatter.title}`));
-    console.log(c.dim(`  ID: ${targetStory.frontmatter.id}`));
-    console.log(c.dim(`  Status: ${targetStory.frontmatter.status}`));
-    console.log(c.dim(`  Actions: ${assessment.recommendedActions.length} of ${originalCount} total`));
-    console.log();
+      const fullSDLCActions = generateFullSDLCActions(targetStory, c);
+      const totalPhases = 5; // refine, research, plan, implement, review
+      const phasesToExecute = fullSDLCActions.length;
+
+      console.log(c.dim(`  Phases to execute: ${phasesToExecute}/${totalPhases}`));
+      console.log();
+
+      if (fullSDLCActions.length === 0) {
+        console.log(c.success('✓ All SDLC phases already completed!'));
+        console.log(c.dim('Story has completed: refine, research, plan, implement, and review.'));
+        return;
+      }
+
+      // Replace assessment actions with full SDLC sequence
+      assessment.recommendedActions = fullSDLCActions;
+    } else {
+      // Normal --story mode: Filter existing recommended actions
+      const originalCount = assessment.recommendedActions.length;
+      assessment.recommendedActions = assessment.recommendedActions.filter(
+        action => action.storyPath === targetStory!.path
+      );
+
+      console.log(c.info(`Targeting story: ${targetStory.frontmatter.title}`));
+      console.log(c.dim(`  ID: ${targetStory.frontmatter.id}`));
+      console.log(c.dim(`  Status: ${targetStory.frontmatter.status}`));
+      console.log(c.dim(`  Actions: ${assessment.recommendedActions.length} of ${originalCount} total`));
+      console.log();
+    }
   }
 
   // Filter actions by step type if --step flag is provided
@@ -342,8 +464,27 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
   }
 
   // Process actions
+  const totalActions = actionsToProcess.length;
+  let currentActionIndex = 0;
+
   for (const action of actionsToProcess) {
+    currentActionIndex++;
+
+    // Enhanced progress indicator for full SDLC mode
+    if (isFullSDLC && totalActions > 1) {
+      console.log(c.info(`\n═══ Phase ${currentActionIndex}/${totalActions}: ${action.type.toUpperCase()} ═══`));
+    }
+
     const actionSuccess = await executeAction(action, sdlcRoot);
+
+    // Handle action failure in full SDLC mode
+    if (!actionSuccess && isFullSDLC) {
+      console.log();
+      console.log(c.error(`✗ Phase ${action.type} failed`));
+      console.log(c.dim(`Completed ${currentActionIndex - 1} of ${totalActions} phases`));
+      console.log(c.info('Fix the error above and use --continue to resume.'));
+      return;
+    }
 
     // Save checkpoint after successful action
     if (actionSuccess) {
@@ -362,7 +503,12 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
         completedActions,
         context: {
           sdlcRoot,
-          options: { auto: options.auto, dryRun: options.dryRun },
+          options: {
+            auto: options.auto,
+            dryRun: options.dryRun,
+            story: options.story,
+            fullSDLC: isFullSDLC,
+          },
           storyContentHash: calculateStoryHash(action.storyPath),
         },
       };
@@ -373,15 +519,54 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
 
     // Re-assess after each action in auto mode
     if (options.auto) {
-      const newAssessment = assessState(sdlcRoot);
-      if (newAssessment.recommendedActions.length === 0) {
-        console.log(c.success('\n✓ All actions completed!'));
-        await clearWorkflowState(sdlcRoot);
-        console.log(c.dim('Checkpoint cleared.'));
-        break;
+      // For full SDLC mode, check if all phases are complete
+      if (isFullSDLC) {
+        // Check if we've completed all actions in our sequence
+        if (currentActionIndex >= totalActions) {
+          console.log();
+          console.log(c.success('═'.repeat(50)));
+          console.log(c.success(`✓ Full SDLC completed successfully!`));
+          console.log(c.success('═'.repeat(50)));
+          console.log(c.dim(`Completed phases: ${totalActions}/${totalActions}`));
+          console.log(c.dim(`Story is now ready for PR creation.`));
+          await clearWorkflowState(sdlcRoot);
+          console.log(c.dim('Checkpoint cleared.'));
+          break;
+        }
+      } else {
+        // Normal auto mode: re-assess state
+        const newAssessment = assessState(sdlcRoot);
+        if (newAssessment.recommendedActions.length === 0) {
+          console.log(c.success('\n✓ All actions completed!'));
+          await clearWorkflowState(sdlcRoot);
+          console.log(c.dim('Checkpoint cleared.'));
+          break;
+        }
       }
     }
   }
+}
+
+/**
+ * Validate and resolve the story path for an action.
+ * If the path doesn't exist, attempts to find the story by ID.
+ *
+ * @returns The resolved story path, or null if story cannot be found
+ */
+function resolveStoryPath(action: Action, sdlcRoot: string): string | null {
+  // Check if the current path exists
+  if (fs.existsSync(action.storyPath)) {
+    return action.storyPath;
+  }
+
+  // Path is stale - try to find by story ID
+  const story = findStoryById(sdlcRoot, action.storyId);
+  if (story) {
+    return story.path;
+  }
+
+  // Story not found by ID either
+  return null;
 }
 
 /**
@@ -392,6 +577,25 @@ export async function run(options: { auto?: boolean; dryRun?: boolean; continue?
 async function executeAction(action: Action, sdlcRoot: string): Promise<boolean> {
   const config = loadConfig();
   const c = getThemedChalk(config);
+
+  // Validate and resolve the story path before executing
+  const resolvedPath = resolveStoryPath(action, sdlcRoot);
+  if (!resolvedPath) {
+    console.log(c.error(`Error: Story not found for action "${action.type}"`));
+    console.log(c.dim(`  Story ID: ${action.storyId}`));
+    console.log(c.dim(`  Original path: ${action.storyPath}`));
+    console.log(c.dim('  The story file may have been moved or deleted.'));
+    return false;
+  }
+
+  // Update action path if it was stale
+  if (resolvedPath !== action.storyPath) {
+    console.log(c.warning(`Note: Story path updated (file was moved)`));
+    console.log(c.dim(`  From: ${action.storyPath}`));
+    console.log(c.dim(`  To: ${resolvedPath}`));
+    action.storyPath = resolvedPath;
+  }
+
   const spinner = ora(formatAction(action)).start();
 
   try {

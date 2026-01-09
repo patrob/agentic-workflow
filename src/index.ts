@@ -57,11 +57,11 @@ program
 program
   .command('run')
   .description('Run the workflow (process next action)')
-  .option('--auto', 'Process all pending actions')
+  .option('--auto', 'Process all pending actions (combine with --story for full SDLC: refine → research → plan → implement → review)')
   .option('--dry-run', 'Show what would be done without executing')
   .option('--continue', 'Resume workflow from last checkpoint')
   .option('--story <id-or-slug>', 'Target a specific story by ID or slug')
-  .option('--step <phase>', 'Run a specific phase (refine, research, plan, implement, review)')
+  .option('--step <phase>', 'Run a specific phase (refine, research, plan, implement, review) - cannot be combined with --auto --story')
   .action((options) => {
     if (!options.dryRun) {
       checkApiKey();
